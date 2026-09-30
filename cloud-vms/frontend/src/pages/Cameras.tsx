@@ -18,8 +18,13 @@ export default function Cameras() {
     catch (e) { toast(errorText(e), "err"); }
   };
   const remove = async (c: Camera) => {
-    if (!confirm(`Delete camera "${c.name}"? Its zones, incidents and recordings metadata are removed too.`)) return;
-    try { await del(`/cameras/${c.id}`); toast(`Deleted ${c.name}`); reload(); } catch (e) { toast(errorText(e), "err"); }
+    if (!confirm(`Delete camera "${c.name}"?\n\nEverything it recorded is erased too: its people and vehicle counts on the ` +
+      "Gate overview, incidents, recordings and zones. This cannot be undone.")) return;
+    try {
+      await del(`/cameras/${c.id}`);
+      toast(`Deleted ${c.name} and its statistics`);
+      reload();
+    } catch (e) { toast(errorText(e), "err"); }
   };
 
   return (
@@ -75,6 +80,7 @@ function CameraForm({ cam, onClose, onSaved }: { cam: Camera | null; onClose: ()
     enabled: cam?.enabled ?? true,
     inference_fps: a?.inference_fps ?? 5, imgsz: a?.imgsz ?? 640, detector_conf: a?.detector_conf ?? 0.15,
     reid_enabled: a?.reid_enabled ?? true, rider_suppression: a?.rider_suppression ?? true,
+    reid_memory_minutes: Math.round((a?.reid_memory_seconds ?? 1800) / 60),
     evidence_pre_seconds: a?.evidence_pre_seconds ?? 5, evidence_post_seconds: a?.evidence_post_seconds ?? 8,
     realtime: a?.realtime ?? true, loop: a?.loop ?? true,
     segment_seconds: cam?.recording_config?.segment_seconds ?? 60, rec_fps: cam?.recording_config?.fps ?? 10,
@@ -105,6 +111,7 @@ function CameraForm({ cam, onClose, onSaved }: { cam: Camera | null; onClose: ()
     ...(v.username || v.password ? { username: v.username, password: v.password } : {}),
     analytics_config: { inference_fps: +v.inference_fps, imgsz: +v.imgsz, detector_conf: +v.detector_conf,
       reid_enabled: v.reid_enabled, rider_suppression: v.rider_suppression,
+      reid_memory_seconds: Math.max(0, +v.reid_memory_minutes) * 60,
       evidence_pre_seconds: +v.evidence_pre_seconds, evidence_post_seconds: +v.evidence_post_seconds,
       realtime: v.realtime, loop: v.loop },
     recording_config: { segment_seconds: +v.segment_seconds, fps: +v.rec_fps, max_height: +v.max_height },
@@ -171,7 +178,8 @@ function CameraForm({ cam, onClose, onSaved }: { cam: Camera | null; onClose: ()
             <label className="check full"><input type="checkbox" checked={v.analytics_enabled} onChange={(e) => set("analytics_enabled", e.target.checked)} />Detect, track and count people and vehicles</label>
             <label className="field">Frames analysed per second<input type="number" min={0.2} max={30} step={0.5} value={v.inference_fps} onChange={(e) => set("inference_fps", e.target.value)} /><span className="hint">5 is a good start on a laptop CPU.</span></label>
             <label className="field">Model input size<select value={v.imgsz} onChange={(e) => set("imgsz", e.target.value)}>{[480, 640, 800, 960, 1280].map((s) => <option key={s}>{s}</option>)}</select><span className="hint">Larger finds distant people, costs time.</span></label>
-            <label className="check"><input type="checkbox" checked={v.reid_enabled} onChange={(e) => set("reid_enabled", e.target.checked)} />Re-identify briefly hidden people (fewer double counts)</label>
+            <label className="check"><input type="checkbox" checked={v.reid_enabled} onChange={(e) => set("reid_enabled", e.target.checked)} />Count each person / vehicle once (appearance re-identification)</label>
+            <label className="field">Recognise returning people for (minutes)<input type="number" min={0} max={1440} value={v.reid_memory_minutes} disabled={!v.reid_enabled} onChange={(e) => set("reid_memory_minutes", e.target.value)} /><span className="hint">Somebody who leaves the view and comes back within this time is not counted again.</span></label>
             <label className="check"><input type="checkbox" checked={v.rider_suppression} onChange={(e) => set("rider_suppression", e.target.checked)} />Don't count riders on two-wheelers as pedestrians</label>
             <label className="field">Evidence before incident (s)<input type="number" min={0} max={60} value={v.evidence_pre_seconds} onChange={(e) => set("evidence_pre_seconds", e.target.value)} /></label>
             <label className="field">Evidence after incident (s)<input type="number" min={1} max={120} value={v.evidence_post_seconds} onChange={(e) => set("evidence_post_seconds", e.target.value)} /></label>

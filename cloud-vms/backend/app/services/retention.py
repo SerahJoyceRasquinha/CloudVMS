@@ -15,7 +15,7 @@ from sqlalchemy import delete, select
 from ..core.config import get_settings
 from ..core.timeutil import utcnow
 from ..db import session_scope
-from ..models import CameraHealth, Crossing, Detection, EventEvidence, RecordingSegment, Track
+from ..models import CameraHealth, Crossing, Detection, EventEvidence, Identity, RecordingSegment, Track
 from .storage import get_storage
 
 log = logging.getLogger("vms.retention")
@@ -47,6 +47,7 @@ def run_retention() -> dict:
         cutoff = now - timedelta(days=s.retention_tracks_days)
         stats["tracks"] += db.execute(delete(Track).where(Track.last_seen_at < cutoff)).rowcount or 0
         db.execute(delete(Crossing).where(Crossing.ts < cutoff))
+        db.execute(delete(Identity).where(Identity.first_seen_at < cutoff))
         db.execute(delete(Detection).where(Detection.frame_ts < now - timedelta(days=2)))
         stats["health"] = db.execute(delete(CameraHealth).where(
             CameraHealth.ts < now - timedelta(days=s.retention_health_days))).rowcount or 0

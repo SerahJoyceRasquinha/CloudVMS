@@ -47,20 +47,21 @@ export default function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="shell">
       <aside className="rail">
-        <div className="brand"><Logo /><div><b>Gatehouse</b><small>Cloud video management</small></div></div>
+        <div className="brand"><Logo /><div><b>Gatehouse</b><small>Video management</small></div></div>
         <nav className="nav" aria-label="Main">
+          {NAV.some((n) => can(n.perm)) && <div className="nav-label">Monitor</div>}
           {NAV.filter((n) => can(n.perm)).map((n) => (
             <NavLink key={n.to} to={n.to} end={n.to === "/"}><n.icon />{n.label}</NavLink>
           ))}
-          <div className="sep" />
+          {SETUP.some((n) => can(n.perm)) && <div className="nav-label">Configure</div>}
           {SETUP.filter((n) => can(n.perm)).map((n) => (
             <NavLink key={n.to} to={n.to}><n.icon />{n.label}</NavLink>
           ))}
         </nav>
         <div className="rail-foot">
-          <div>{user?.full_name || user?.username}</div>
-          <div style={{ opacity: .7 }}>{user?.roles.join(", ")}</div>
-          <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
+          <div className="who">{user?.full_name || user?.username}</div>
+          <div className="role">{user?.roles.map((r) => r.replace(/_/g, " ")).join(", ")}</div>
+          <div className="actions">
             <button onClick={() => setPwOpen(true)}>Password</button>
             <button onClick={cycleTheme}>Theme: {theme}</button>
           </div>
@@ -68,13 +69,13 @@ export default function Layout({ children }: { children: ReactNode }) {
       </aside>
       <div className="main">
         <div className="topbar">
-          <div className="clock">{now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+          <div className="clock">{now.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
             <small>{now.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })}</small></div>
           <div className="ticker">
             {latest ? (<>
               <span className={`badge sev sev-${latest.severity}`}>{eventLabel(latest.event_type)}</span>
               <Link to={`/events?open=${latest.id}`}>{fmtClock(latest.event_timestamp)}, {latest.camera_name}: {latest.title}</Link>
-            </>) : <span className="muted">Listening for new incidents</span>}
+            </>) : <span className="idle"><i />Listening for new incidents</span>}
           </div>
           <div className="user-chip">
             <button className="btn-quiet" onClick={async () => { await logout(); nav("/login"); }}>Sign out</button>
@@ -82,12 +83,13 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
         <main className="content">{children}</main>
       </div>
-      {pwOpen && <ChangePassword forced={!!user?.must_change_password} onClose={() => setPwOpen(false)} />}
+      {(pwOpen || user?.must_change_password) && <ChangePassword forced={!!user?.must_change_password}
+        onClose={() => setPwOpen(false)} onSignOut={async () => { await logout(); nav("/login"); }} />}
     </div>
   );
 }
 
-function ChangePassword({ onClose, forced }: { onClose: () => void; forced: boolean }) {
+function ChangePassword({ onClose, onSignOut, forced }: { onClose: () => void; onSignOut: () => void; forced: boolean }) {
   const { refresh } = useAuth();
   const toast = useToast();
   const [cur, setCur] = useState("");
@@ -97,14 +99,16 @@ function ChangePassword({ onClose, forced }: { onClose: () => void; forced: bool
     try {
       const r = await post<{ access_token: string }>("/auth/change-password", { current_password: cur, new_password: next });
       setToken(r.access_token);
+      // the server refuses every other request until the password is changed, so reload to refetch the pages
+      if (forced) { window.location.reload(); return; }
       await refresh();
       toast("Password changed");
       onClose();
     } catch (e) { setErr(e); }
   };
   return (
-    <Dialog title="Change password" onClose={onClose}
-      footer={<><button onClick={onClose}>{forced ? "Later" : "Cancel"}</button><button className="btn-primary" onClick={save} disabled={!cur || next.length < 8}>Change password</button></>}>
+    <Dialog title="Change password" onClose={forced ? () => {} : onClose}
+      footer={<><button onClick={forced ? onSignOut : onClose}>{forced ? "Sign out" : "Cancel"}</button><button className="btn-primary" onClick={save} disabled={!cur || next.length < 8}>Change password</button></>}>
       {forced && <p className="hint" style={{ marginTop: 0 }}>This account still uses its initial password. Choose your own now.</p>}
       <div className="form-grid">
         <label className="field full">Current password<input type="password" value={cur} onChange={(e) => setCur(e.target.value)} autoFocus /></label>

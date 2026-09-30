@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     admin_password: str = ""  # random if empty; written to data/initial_admin_password.txt
     login_rate_limit_per_minute: int = 10
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    # only honour X-Forwarded-For from these proxy addresses (e.g. ["127.0.0.1"] behind nginx)
+    trusted_proxies: list[str] = Field(default_factory=list)
+
+    # ---- upload limits (MB) -----------------------------------------------
+    max_video_upload_mb: int = 4096
+    max_dataset_upload_mb: int = 4096
+    max_dataset_unzipped_mb: int = 16384  # guards against zip bombs
+    max_weights_upload_mb: int = 1024
 
     # ---- database --------------------------------------------------------
     database_url: str = ""  # default: sqlite file in data_dir

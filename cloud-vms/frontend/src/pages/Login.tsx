@@ -22,24 +22,32 @@ export default function Login() {
   return (
     <div className="login">
       <section className="login-art">
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}><Logo /><b style={{ color: "#fff", fontSize: 18 }}>Gatehouse</b></div>
+        <div className="wordmark"><Logo />Gatehouse</div>
         <div>
-          <h1>Every camera at the gate, one place to watch it.</h1>
+          <svg viewBox="0 0 600 120" style={{ width: "100%", maxWidth: 520, display: "block", marginBottom: 36 }} aria-hidden="true">
+            <path d="M0 104h600" stroke="#34322d" strokeWidth="1" />
+            <path d="M40 104h520" stroke="#d99a2b" strokeWidth="1.5" strokeDasharray="6 8" />
+            <path d="M90 104V46l36-16 36 16v58M438 104V46l36-16 36 16v58" stroke="#8a867d" strokeWidth="1.5" fill="none" strokeLinejoin="round" />
+            <path d="M162 74h276" stroke="#8a867d" strokeWidth="4" />
+            <path d="M300 104V90" stroke="#d99a2b" strokeWidth="1.5" />
+          </svg>
+          <h1>Every camera at the gate, in one place.</h1>
           <p>Live views, entry and exit counts for people and vehicles, and incidents with the video that proves them.</p>
         </div>
-        <svg viewBox="0 0 600 120" style={{ width: "100%", opacity: .5 }} aria-hidden="true">
-          <path d="M0 100h600" stroke="#e8a33d" strokeWidth="2" strokeDasharray="10 10" />
-          <path d="M80 100V40l40-18 40 18v60M440 100V40l40-18 40 18v60" stroke="#c9d2e3" strokeWidth="2" fill="none" />
-          <path d="M160 70h280" stroke="#c9d2e3" strokeWidth="6" />
-        </svg>
+        <div className="facts">
+          <div><b>Live</b>MJPEG and HLS views</div>
+          <div><b>Counted</b>unique entries and exits</div>
+          <div><b>Evidenced</b>clip and snapshot per incident</div>
+        </div>
       </section>
       <section className="login-form">
         <form onSubmit={submit}>
           <h2>Sign in</h2>
+          <p className="hint">Use the account your administrator gave you.</p>
           <label className="field">Username<input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" autoFocus /></label>
           <label className="field">Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" /></label>
           <ErrorBox error={error} />
-          <button className="btn-primary" disabled={busy || !password} style={{ justifyContent: "center", padding: "10px" }}>{busy ? "Signing in" : "Sign in"}</button>
+          <button className="btn-primary" disabled={busy || !password}>{busy ? "Signing in" : "Sign in"}</button>
           <p className="hint">First run? The administrator password is in <code>data/initial_admin_password.txt</code>.</p>
         </form>
       </section>

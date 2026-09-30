@@ -26,15 +26,15 @@ export function GateFlowChart({ series, hourly, mode = "crossings" }:
         <YAxis {...axis} allowDecimals={false} tickFormatter={(v) => String(Math.abs(v))} />
         <ReferenceLine y={0} stroke="var(--ink-3)" />
         <Tooltip cursor={{ fill: "var(--panel-2)" }}
-          contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12.5 }}
+          contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 4, fontSize: 12.5, color: "var(--ink)", boxShadow: "none" }}
           labelFormatter={(_, p) => (p && p[0] ? String((p[0].payload as any).full) : "")}
           formatter={(v: number, name: string) => [Math.abs(v), {
             person_in: mode === "seen" ? "People seen" : "People in", vehicle_in: mode === "seen" ? "Vehicles seen" : "Vehicles in",
             person_out: "People out", vehicle_out: "Vehicles out" }[name] || name]} />
-        <Bar dataKey="person_in" stackId="a" fill={C.people} radius={[2, 2, 0, 0]} />
-        <Bar dataKey="vehicle_in" stackId="a" fill={C.vehicles} radius={[2, 2, 0, 0]} />
+        <Bar dataKey="person_in" stackId="a" fill={C.people} radius={[1, 1, 0, 0]} />
+        <Bar dataKey="vehicle_in" stackId="a" fill={C.vehicles} radius={[1, 1, 0, 0]} />
         {mode === "crossings" && <Bar dataKey="person_out" stackId="a" fill={C.peopleOut} />}
-        {mode === "crossings" && <Bar dataKey="vehicle_out" stackId="a" fill={C.vehiclesOut} radius={[0, 0, 2, 2]} />}
+        {mode === "crossings" && <Bar dataKey="vehicle_out" stackId="a" fill={C.vehiclesOut} radius={[0, 0, 1, 1]} />}
       </BarChart>
     </ResponsiveContainer>
   );
@@ -68,14 +68,14 @@ export function TypeBars({ counts }: { counts: Record<string, number> }) {
   );
 }
 
-export function SimpleBars({ data, color = "var(--amber)" }: { data: { name: string; value: number }[]; color?: string }) {
+export function SimpleBars({ data, color = "var(--ink-3)" }: { data: { name: string; value: number }[]; color?: string }) {
   return (
     <ResponsiveContainer width="100%" height="100%">
       <BarChart data={data} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
         <XAxis type="number" hide allowDecimals={false} />
         <YAxis type="category" dataKey="name" {...axis} width={150} />
-        <Tooltip cursor={{ fill: "var(--panel-2)" }} contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12.5 }} />
-        <Bar dataKey="value" fill={color} radius={[0, 3, 3, 0]} barSize={14} name="Count" />
+        <Tooltip cursor={{ fill: "var(--panel-2)" }} contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 4, fontSize: 12.5, color: "var(--ink)", boxShadow: "none" }} />
+        <Bar dataKey="value" fill={color} radius={[0, 1, 1, 0]} barSize={14} name="Count" />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -88,8 +88,8 @@ export function MetricLines({ data, lines }: { data: any[]; lines: { key: string
         <CartesianGrid vertical={false} stroke="var(--line-2)" />
         <XAxis dataKey="label" {...axis} minTickGap={24} />
         <YAxis {...axis} />
-        <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12.5 }} />
-        {lines.map((l) => <Line key={l.key} type="monotone" dataKey={l.key} name={l.name} stroke={l.color} dot={false} strokeWidth={2} />)}
+        <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--line)", borderRadius: 4, fontSize: 12.5, color: "var(--ink)", boxShadow: "none" }} />
+        {lines.map((l) => <Line key={l.key} type="monotone" dataKey={l.key} name={l.name} stroke={l.color} dot={false} strokeWidth={1.5} />)}
       </LineChart>
     </ResponsiveContainer>
   );

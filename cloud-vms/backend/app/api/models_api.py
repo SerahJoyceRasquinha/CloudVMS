@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from ..models import Dataset, ModelVersion, TrainingJob, User
 from ..schemas import DatasetOut, ModelIn, ModelOut, TrainingIn, TrainingOut
 from ..services.audit import audit, bump_models_version, get_setting, set_setting
 from ..services.model_registry import activate, model_is_available
+from ..services.storage import UploadTooLarge, save_upload
 from ..services.training import import_dataset_async, start_training
 
 router = APIRouter(tags=["models"])
@@ -91,23 +93,40 @@ async def upload_weights(request: Request, file: UploadFile = File(...), name: s
     import json
     if not (file.filename or "").endswith(".pt"):
         raise bad_request("Upload an Ultralytics .pt file")
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)[:80]
-    dst = get_settings().weights_dir / f"{safe}.pt"
-    with open(dst, "wb") as f:
-        shutil.copyfileobj(file.file, f, length=1 << 20)
+    s = get_settings()
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")[:80]
+    if not safe:
+        raise bad_request("Give the model a name")
+    if db.scalar(select(ModelVersion).where(ModelVersion.name == safe)):
+        raise bad_request("A model with this name already exists")
+    dst = s.weights_dir / f"{safe}.pt"
+    if dst.exists():  # never replace weights another model (e.g. the active yolo26n.pt) may be using
+        raise bad_request(f"A weights file named {dst.name} already exists; choose another name")
+    # write to a temporary file first so a failed upload never leaves a half-written file behind
+    tmp = s.tmp_dir / f"upload_{uuid.uuid4().hex}.pt"
+    try:
+        save_upload(file.file, tmp, s.max_weights_upload_mb)
+    except UploadTooLarge as exc:
+        raise bad_request(str(exc))
     try:
         cmap = json.loads(class_map) if class_map.strip() else {}
         if not cmap:
             from ultralytics import YOLO
-            names = YOLO(str(dst)).names
+            names = YOLO(str(tmp)).names
             cmap = {str(n): normalize_label(n) for n in names.values() if normalize_label(n) in CANONICAL_CLASSES}
     except Exception as exc:
-        dst.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise bad_request(f"Could not read the weights / class map: {exc}")
     if not cmap:
+        tmp.unlink(missing_ok=True)
         raise bad_request("None of the model's labels match canonical classes; provide a class_map")
-    return register_model(ModelIn(name=safe, role=role, weights=str(dst), class_map=cmap,
-                                  notes="uploaded weights"), request, user, db)
+    shutil.move(str(tmp), dst)
+    try:
+        return register_model(ModelIn(name=safe, role=role, weights=str(dst), class_map=cmap,
+                                      notes="uploaded weights"), request, user, db)
+    except Exception:
+        dst.unlink(missing_ok=True)  # safe: we checked above that dst did not exist before
+        raise
 
 
 # ------------------------------------------------------------------ datasets
@@ -132,18 +151,26 @@ async def upload_dataset(request: Request, file: UploadFile = File(...), name: s
     raw = root / "_raw"
     raw.mkdir(parents=True, exist_ok=True)
     zpath = root / "upload.zip"
-    with open(zpath, "wb") as f:
-        shutil.copyfileobj(file.file, f, length=1 << 20)
     try:
+        save_upload(file.file, zpath, s.max_dataset_upload_mb)
         with zipfile.ZipFile(zpath) as z:
             for member in z.namelist():  # zip-slip protection
                 target = (raw / member).resolve()
                 if raw.resolve() not in target.parents and target != raw.resolve():
                     raise bad_request("Zip contains unsafe paths")
+            unzipped = sum(i.file_size for i in z.infolist())  # zip-bomb protection
+            if unzipped > s.max_dataset_unzipped_mb * 1024 * 1024:
+                raise bad_request(f"Zip expands to more than {s.max_dataset_unzipped_mb} MB")
             z.extractall(raw)
+    except UploadTooLarge as exc:
+        shutil.rmtree(root, ignore_errors=True)
+        raise bad_request(str(exc))
     except zipfile.BadZipFile:
         shutil.rmtree(root, ignore_errors=True)
         raise bad_request("Not a valid zip file")
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
     zpath.unlink(missing_ok=True)
     ds = Dataset(name=safe, kind="detection", path=str(root), status="processing")
     db.add(ds)

@@ -70,7 +70,7 @@ export default function System() {
 }
 
 function Tile({ title, value, sub }: { title: string; value: string; sub: string }) {
-  return <section className="panel"><div className="body"><div className="small muted">{title}</div><div className="num" style={{ fontSize: 20, fontWeight: 700 }}>{value}</div><div className="small muted">{sub}</div></div></section>;
+  return <section className="panel"><div className="body"><div className="small muted">{title}</div><div className="num" style={{ fontSize: 22, fontWeight: 500, letterSpacing: "-0.02em", lineHeight: 1.35 }}>{value}</div><div className="small muted">{sub}</div></div></section>;
 }
 
 function RunView({ run }: { run: any }) {

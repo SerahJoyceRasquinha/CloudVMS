@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String,
+from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String,
                         Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -205,8 +205,8 @@ class Track(Base):
     __tablename__ = "tracks"
     id: Mapped[int] = mapped_column(primary_key=True)
     camera_id: Mapped[int] = mapped_column(Integer)
-    track_uid: Mapped[int] = mapped_column(Integer)  # camera-scoped tracker id
-    root_uid: Mapped[int] = mapped_column(Integer)  # after short-term re-identification
+    track_uid: Mapped[int] = mapped_column(BigInteger)  # tracker id (unique per camera across restarts)
+    root_uid: Mapped[int] = mapped_column(BigInteger)  # identity after re-identification
     object_class: Mapped[str] = mapped_column(String(40))
     object_group: Mapped[str] = mapped_column(String(20))
     subtype: Mapped[str] = mapped_column(String(60), default="")
@@ -226,8 +226,8 @@ class Crossing(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     camera_id: Mapped[int] = mapped_column(Integer)
     zone_id: Mapped[int] = mapped_column(Integer)
-    track_uid: Mapped[int] = mapped_column(Integer)
-    root_uid: Mapped[int] = mapped_column(Integer)
+    track_uid: Mapped[int] = mapped_column(BigInteger)
+    root_uid: Mapped[int] = mapped_column(BigInteger)
     object_class: Mapped[str] = mapped_column(String(40))
     object_group: Mapped[str] = mapped_column(String(20))
     subtype: Mapped[str] = mapped_column(String(60), default="")
@@ -237,13 +237,32 @@ class Crossing(Base):
                       Index("ix_cross_cam_ts", "camera_id", "ts"))
 
 
+class Identity(Base):
+    """One unique person / vehicle at a camera (after re-identification): the basis of the
+    "seen" counts. Written as soon as the object's identity is decided, so counts are live."""
+    __tablename__ = "identities"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    camera_id: Mapped[int] = mapped_column(Integer)
+    root_uid: Mapped[int] = mapped_column(BigInteger)
+    object_class: Mapped[str] = mapped_column(String(40))
+    object_group: Mapped[str] = mapped_column(String(20))
+    subtype: Mapped[str] = mapped_column(String(60), default="")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime)
+    # re-ID memory survives restarts: appearance prototypes (float16, base64) and when last seen
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    embedder: Mapped[str] = mapped_column(String(40), default="")
+    appearance: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    __table_args__ = (Index("ix_ident_first_group", "first_seen_at", "object_group"),
+                      Index("ix_ident_cam_root", "camera_id", "root_uid"))
+
+
 # ============================================================ events
 class Event(Base):
     __tablename__ = "events"
     id: Mapped[int] = mapped_column(primary_key=True)
     camera_id: Mapped[int] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"))
     zone_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    track_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    track_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     event_type: Mapped[str] = mapped_column(String(40))
     object_type: Mapped[str] = mapped_column(String(40), default="")
     event_timestamp: Mapped[datetime] = mapped_column(DateTime)  # source frame time

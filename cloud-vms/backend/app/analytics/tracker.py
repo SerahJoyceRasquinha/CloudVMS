@@ -72,6 +72,7 @@ class _Track:
     trajectory: deque = field(default_factory=lambda: deque(maxlen=300))
     last_bbox: tuple = (0, 0, 0, 0)
     appearance: object = None  # optional re-ID embedding
+    retired: bool = False  # its identity continues in another track: end it at the next update
 
     def predict(self, ts: float) -> tuple[float, float, float, float]:
         dt = max(0.0, min(ts - self.last_ts, 1.5))  # do not extrapolate too far
@@ -173,7 +174,7 @@ class ByteTracker:
         high = [d for d in detections if d.confidence >= cfg.high_thresh]
         low = [d for d in detections if cfg.low_thresh <= d.confidence < cfg.high_thresh]
         active = [t for t in self.tracks if t.state == ACTIVE]
-        lost = [t for t in self.tracks if t.state == LOST]
+        lost = [t for t in self.tracks if t.state == LOST and not t.retired]
         unconfirmed = [t for t in self.tracks if t.state == NEW]
         matched_ids: set[int] = set()
         confirmed_now: list[int] = []
@@ -216,7 +217,7 @@ class ByteTracker:
                 continue  # unconfirmed and missed -> drop silently (likely a false positive)
             if t.state == ACTIVE:
                 t.state = LOST
-            if ts - t.last_ts > cfg.max_lost_seconds:
+            if t.retired or ts - t.last_ts > cfg.max_lost_seconds:
                 t.state = TERMINATED
                 terminated.append(t)
             else:

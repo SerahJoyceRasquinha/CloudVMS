@@ -100,6 +100,9 @@ class EvidenceWriter:
         self.pool.submit(self._write, job)
 
     def _write(self, job: EvidenceJob) -> None:
+        with session_scope() as db:
+            if db.get(Event, job.event_id) is None:
+                return  # incident (or its camera) deleted while the clip was being captured
         s = get_settings()
         storage = get_storage()
         ev_dt = from_epoch(job.event_ts)
@@ -137,6 +140,9 @@ class EvidenceWriter:
 def store_snapshot(event_id: int, camera_id: int, event_ts: float, jpeg: bytes) -> None:
     from ..services.storage import snapshot_key
     s = get_settings()
+    with session_scope() as db:
+        if db.get(Event, event_id) is None:
+            return  # deleted meanwhile
     key = snapshot_key(camera_id, from_epoch(event_ts), event_id)
     try:
         size = get_storage().put_bytes(key, jpeg, "image/jpeg")

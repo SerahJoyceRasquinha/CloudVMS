@@ -54,11 +54,11 @@ Linux/macOS: `./run_vms.sh` (same checks via `install_prerequisites.sh`; press C
 | Requirement | Where |
 |---|---|
 | Camera registration & management, health, encrypted credentials | Cameras page · `api/cameras.py` |
-| Live streaming | Live view (annotated MJPEG) · optional raw HLS/WebRTC through MediaMTX |
+| Live streaming | Live view (annotated frames, long-poll) · optional raw HLS/WebRTC through MediaMTX |
 | Recording, cloud storage, playback | FFmpeg segmenter → local disk or **S3**; Recordings page |
 | Person detection | YOLO26 (COCO); CrowdHuman fine-tuning path |
 | Vehicle detection (Indian classes) | IISc **UVH-26** YOLOv11 model (auto-rickshaw, two-wheeler, tempo …) or COCO fallback |
-| Unique counts of people / vehicles entering and leaving | ByteTrack-style tracker + re-ID + counting lines |
+| Unique counts of people / vehicles entering and leaving | ByteTrack-style tracker + OSNet appearance re-ID (a person who leaves and returns counts once) + counting lines |
 | Intrusion detection | Polygon + schedule + entry-from-outside rule (perimeter-intrusion definition) |
 | Restricted-area access | Per-zone allow/alert policies by object type and time |
 | Event management, searchable metadata, alerts | Incidents page, filters, CSV export, live toasts (SSE), webhook |
@@ -129,5 +129,5 @@ API documentation: <http://localhost:8000/api/docs>
 ## Limitations
 
 Read `docs/architecture.md` → *Known limitations*. In short: counting accuracy depends on the camera
-angle, re-ID works only within one camera and a few seconds, the on-site estimate drifts, and
+angle, re-ID works within one camera (default memory 30 minutes) and can merge look-alikes, the on-site estimate drifts, and
 the benchmark numbers only hold for the machine they were measured on.

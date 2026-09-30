@@ -2,11 +2,13 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { get } from "../api";
 import { FlowLegend, GateFlowChart, TypeBars } from "../components/Charts";
-import { Empty, ErrorBox, SevBadge, StatusBadge } from "../components/ui";
-import { classLabel, eventLabel, fmtBytes, fmtClock, fmtDuration, useLoad } from "../hooks";
+import { Empty, ErrorBox, StatusBadge } from "../components/ui";
+import { classLabel, eventLabel, fmtBytes, fmtClock, fmtDuration, useClock, useLoad } from "../hooks";
 import type { Summary } from "../types";
 
 type RangeKey = "today" | "yesterday" | "7d" | "30d";
+
+const REFRESH_MS = 3000; // live numbers: the counts change on screen within a few seconds
 
 function rangeFor(k: RangeKey): { start?: string; end?: string; label: string } {
   const now = new Date();
@@ -23,7 +25,11 @@ function rangeFor(k: RangeKey): { start?: string; end?: string; label: string } 
 export default function Dashboard() {
   const [range, setRange] = useState<RangeKey>("today");
   const r = useMemo(() => rangeFor(range), [range]);
-  const { data: s, error } = useLoad(() => get<Summary>("/analytics/summary", { start: r.start, end: r.end }), [range], 10000);
+  // "7d" / "30d" end at "now", so they are recomputed on every refresh as well
+  const { data: s, error, updatedAt, reload } = useLoad(() => {
+    const cur = rangeFor(range);
+    return get<Summary>("/analytics/summary", { start: cur.start, end: cur.end });
+  }, [range], REFRESH_MS);
 
   if (error && !s) return <ErrorBox error={error} />;
   if (!s) return <p className="muted">Loading today's numbers</p>;
@@ -39,6 +45,8 @@ export default function Dashboard() {
           <p>{r.label}. Counts are unique tracked people and vehicles crossing the gate lines.</p>
         </div>
         <span className="spacer" />
+        <LiveBadge updatedAt={updatedAt} failing={!!error} />
+        <RefreshButton onRefresh={reload} />
         <div className="btn-row" role="group" aria-label="Period">
           {(["today", "yesterday", "7d", "30d"] as RangeKey[]).map((k) => (
             <button key={k} className={k === range ? "btn-primary" : ""} onClick={() => setRange(k)}>{rangeFor(k).label}</button>
@@ -131,8 +139,8 @@ export default function Dashboard() {
           <header><h2>Processing</h2></header>
           <div className="body">
             <dl className="kv">
-              <dt>Stream to decision</dt><dd className="num">{s.processing.avg_end_to_end_ms != null ? `${s.processing.avg_end_to_end_ms} ms` : "no live cameras"}</dd>
-              <dt>Model time per frame</dt><dd className="num">{s.processing.avg_inference_ms != null ? `${s.processing.avg_inference_ms} ms` : "—"}</dd>
+              <dt>Stream to decision</dt><dd className="num">{s.processing.avg_end_to_end_ms != null ? `${s.processing.avg_end_to_end_ms} ms` : <span className="muted">no live cameras</span>}</dd>
+              <dt>Model time per frame</dt><dd className="num">{s.processing.avg_inference_ms != null ? `${s.processing.avg_inference_ms} ms` : <span className="muted">—</span>}</dd>
               <dt>Frames analysed</dt><dd className="num">{s.processing.total_inference_fps} per second</dd>
               <dt>Worker CPU</dt><dd className="num">{s.processing.cpu_percent != null ? `${s.processing.cpu_percent}%` : "—"}</dd>
               <dt>Detector</dt><dd>{s.workers.detector || "—"}{s.workers.device ? ` on ${s.workers.device}` : ""}</dd>
@@ -145,20 +153,72 @@ export default function Dashboard() {
 
       {Object.keys(s.events.by_type).length > 0 && (
         <section className="panel" style={{ marginTop: 16 }}>
-          <header><h2>Incidents by type</h2></header>
-          <div className="body stat-row">
-            {Object.entries(s.events.by_type).map(([k, v]) => (
-              <div className="stat" key={k}><b>{v}</b><span>{eventLabel(k)}</span></div>
-            ))}
-            {Object.entries(s.events.by_severity).length > 0 && (
-              <div className="stat"><div className="btn-row">{Object.entries(s.events.by_severity).map(([k, v]) =>
-                <span key={k} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}><SevBadge severity={k} /><b className="num" style={{ fontSize: 15, display: "inline" }}>{v}</b></span>)}</div>
-                <span>by severity</span></div>
-            )}
+          <header><h2>Incidents in this period</h2><span className="spacer" /><span className="small muted num">{s.events.total} total</span></header>
+          <div className="body incident-mix">
+            <div className="stat-row">
+              {Object.entries(s.events.by_type).sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+                <div className="stat" key={k}><b className="num">{v}</b><span>{eventLabel(k)}</span></div>
+              ))}
+            </div>
+            <SeveritySplit counts={s.events.by_severity} />
           </div>
         </section>
       )}
     </>
+  );
+}
+
+/** Fetch the numbers now, in case an automatic refresh was missed. */
+function RefreshButton({ onRefresh }: { onRefresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const click = async () => {
+    setBusy(true);
+    const t0 = Date.now();
+    await onRefresh(); // a failure shows up in the badge next to the button
+    // keep the spinner visible briefly so a fast refresh is still noticeable
+    setTimeout(() => setBusy(false), Math.max(0, 400 - (Date.now() - t0)));
+  };
+  return (
+    <button className="btn-refresh" onClick={click} disabled={busy} aria-label="Refresh statistics" title="Refresh statistics now">
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" className={busy ? "spin" : undefined}>
+        <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      {busy ? "Refreshing" : "Refresh"}
+    </button>
+  );
+}
+
+function LiveBadge({ updatedAt, failing }: { updatedAt: number | null; failing: boolean }) {
+  const now = useClock(1000);
+  const age = updatedAt ? Math.max(0, Math.round((now.getTime() - updatedAt) / 1000)) : null;
+  const stale = failing || age == null || age > 15;
+  return (
+    <span className={`live-badge${stale ? " stale" : ""}`} role="status" title="The numbers refresh automatically every few seconds">
+      <i />{stale ? (failing ? "Reconnecting" : "Waiting for data") : "Live"}
+      {age != null && <small>updated {age}s ago</small>}
+    </span>
+  );
+}
+
+const SEVERITIES = ["critical", "high", "medium", "low"];
+
+function SeveritySplit({ counts }: { counts: Record<string, number> }) {
+  const total = SEVERITIES.reduce((n, k) => n + (counts[k] || 0), 0);
+  if (!total) return null;
+  return (
+    <div className="sev-split">
+      <span className="small muted">By severity</span>
+      <div className="track" role="img" aria-label={SEVERITIES.map((k) => `${counts[k] || 0} ${k}`).join(", ")}>
+        {SEVERITIES.filter((k) => counts[k]).map((k) => (
+          <span key={k} style={{ flex: counts[k], background: `var(--sev-${k})` }} />
+        ))}
+      </div>
+      <ul>
+        {SEVERITIES.map((k) => (
+          <li key={k}><i style={{ background: `var(--sev-${k})` }} />{k.charAt(0).toUpperCase() + k.slice(1)}<b>{counts[k] || 0}</b></li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -167,7 +227,7 @@ function GateSide({ who, color, main, mainLabel, stats, chips }:
   return (
     <div className="gate-side">
       <div className="who"><i style={{ background: color }} />{who}</div>
-      <div><div className="big" style={{ color }}>{main}</div><div className="muted small">{mainLabel}</div></div>
+      <div><div className="big">{main}</div><div className="muted small">{mainLabel}</div></div>
       <div className="gate-stats">
         {stats.map(([k, v]) => <div key={k}><b>{v}</b><span>{k}</span></div>)}
       </div>

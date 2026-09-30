@@ -105,6 +105,7 @@ def test_full_pipeline(env):
     assert clip.status_code == 200 and clip.content[4:8] == b"ftyp"  # a real MP4
     assert kinds["clip"]["duration_s"] > 1
 
+    assert sup.workers[cid].metrics.frames_dropped == 0  # offline analysis waits instead of dropping frames
     sup.persist_health()
     sup.db_writer.flush()
     s = wait_for(lambda: (lambda d: d if d["people"]["entries"] >= 1 else None)(
@@ -134,10 +135,11 @@ def test_recording_segments(env):
     cid = cam["id"]
     sup.reconcile()
     assert cid in sup.recorders
-    time.sleep(8)
-    sup.reconcile()  # ingests finished segments
-    segs = wait_for(lambda: client.get(f"/api/cameras/{cid}/recordings", headers=h).json()["items"], timeout=20,
-                    every=1) or []
+
+    def ingested_segments():
+        sup.reconcile()  # ingests finished segments, as the supervisor loop does every few seconds
+        return client.get(f"/api/cameras/{cid}/recordings", headers=h).json()["items"]
+    segs = wait_for(ingested_segments, timeout=40, every=1) or []
     assert len(segs) >= 1 and all(s["status"] in ("complete", "incomplete") for s in segs)
     play = client.get(f"/api/recordings/{segs[0]['id']}/playback", headers=h).json()
     data = client.get(play["url"]).content

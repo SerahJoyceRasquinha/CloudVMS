@@ -15,6 +15,12 @@ import Recordings from "./pages/Recordings";
 import System from "./pages/System";
 import Users from "./pages/Users";
 import Zones from "./pages/Zones";
+// fonts are bundled (not fetched from Google) so the dashboard looks the same on an offline campus network
+import "@fontsource/ibm-plex-sans/latin-400.css";
+import "@fontsource/ibm-plex-sans/latin-500.css";
+import "@fontsource/ibm-plex-sans/latin-600.css";
+import "@fontsource/ibm-plex-mono/latin-400.css";
+import "@fontsource/ibm-plex-mono/latin-500.css";
 import "./styles.css";
 
 try {

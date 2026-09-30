@@ -50,6 +50,26 @@ def thumbnail_key(camera_id: int) -> str:
     return validate_key(f"thumbnails/{camera_id}/latest.jpg")
 
 
+class UploadTooLarge(ValueError):
+    pass
+
+
+def save_upload(src, dst: Path, max_mb: int) -> int:
+    """Stream an uploaded file to ``dst``, refusing (and removing) anything larger than ``max_mb``."""
+    limit, size = max_mb * 1024 * 1024, 0
+    try:
+        with open(dst, "wb") as f:
+            for chunk in iter(lambda: src.read(1 << 20), b""):
+                size += len(chunk)
+                if size > limit:
+                    raise UploadTooLarge(f"File is larger than the {max_mb} MB limit")
+                f.write(chunk)
+    except BaseException:
+        dst.unlink(missing_ok=True)
+        raise
+    return size
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:

@@ -20,7 +20,7 @@ import cv2
 from ..core.config import get_settings
 from ..core.logging import redact
 from ..db import session_scope
-from ..models import RecordingSegment
+from ..models import Camera, RecordingSegment
 from ..services.storage import get_storage, recording_key
 from .evidence import ffmpeg_exe
 
@@ -194,6 +194,10 @@ class Recorder:
             seg.status, seg.upload_attempts = "failed", 3
             log.error("camera %s: segment upload failed: %s", self.camera_id, exc)
         with session_scope() as db:
+            if db.get(Camera, self.camera_id) is None:  # camera deleted meanwhile: don't keep the file
+                if seg.status != "failed":
+                    get_storage().delete(key)
+                return False
             if db.query(RecordingSegment).filter_by(object_key=key).first() is None:
                 db.add(seg)
         self.segments_written += 1

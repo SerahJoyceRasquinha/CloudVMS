@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import uuid
 from pathlib import Path
 
@@ -19,8 +18,8 @@ from ..deps import client_ip, get_camera_for, require, scoped_camera_ids
 from ..models import Camera, CameraCredential, CameraHealth, User, Zone
 from ..schemas import AnalyticsSettings, CameraIn, CameraOut, CameraPatch, HealthOut
 from ..services.audit import audit
-from ..services.camera_service import default_analytics_config, stream_url
-from ..services.storage import get_storage
+from ..services.camera_service import default_analytics_config, delete_objects_async, purge_camera_data, stream_url
+from ..services.storage import UploadTooLarge, get_storage, save_upload
 from ..workers.sources import probe
 
 router = APIRouter(tags=["cameras"])
@@ -106,8 +105,10 @@ async def upload_video(file: UploadFile = File(...), user: User = Depends(requir
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(file.filename).stem)[:60] or "video"
     name = f"{stem}_{uuid.uuid4().hex[:6]}{ext}"
     dst = s.uploads_dir / name
-    with open(dst, "wb") as f:
-        shutil.copyfileobj(file.file, f, length=1 << 20)
+    try:
+        save_upload(file.file, dst, s.max_video_upload_mb)
+    except UploadTooLarge as exc:
+        raise bad_request(str(exc))
     info = probe("file", str(dst))
     info.pop("frame", None)
     if not info.get("ok"):
@@ -160,11 +161,19 @@ def update_analytics_config(camera_id: int, body: AnalyticsSettings, request: Re
 @router.delete("/cameras/{camera_id}")
 def delete_camera(camera_id: int, request: Request, user: User = Depends(require("cameras:manage")),
                   db: Session = Depends(get_db)):
+    """Delete a camera together with all its statistics, incidents, recordings and stored media,
+    so the overview no longer counts anything it saw."""
+    from ..workers.supervisor import get_supervisor
     cam = get_camera_for(user, db, camera_id)
     name = cam.name
+    sup = get_supervisor()
+    if sup is not None:  # stop its pipeline first so nothing is written after the purge
+        sup.forget_camera(camera_id)
+    removed, keys = purge_camera_data(db, camera_id)
     db.delete(cam)
-    audit(db, user, "camera.delete", "camera", camera_id, {"name": name}, client_ip(request))
-    return {"ok": True}
+    audit(db, user, "camera.delete", "camera", camera_id, {"name": name, "removed": removed}, client_ip(request))
+    delete_objects_async(keys)
+    return {"ok": True, "removed": removed, "files": len(keys)}
 
 
 def _set_enabled(camera_id: int, enabled: bool, request: Request, user: User, db: Session) -> CameraOut:

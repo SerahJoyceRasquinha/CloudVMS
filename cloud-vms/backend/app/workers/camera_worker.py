@@ -36,6 +36,11 @@ from .sources import VideoSource
 log = logging.getLogger("vms.camera")
 
 
+def _epoch(dt: datetime) -> float:
+    from datetime import timezone
+    return dt.replace(tzinfo=timezone.utc).timestamp()  # stored as naive UTC
+
+
 @dataclass
 class CameraRuntimeConfig:
     camera_id: int
@@ -83,6 +88,8 @@ class CameraMetrics:
     events_merged: int = 0
     events_suppressed: int = 0
     crossings: int = 0
+    unique_objects: int = 0
+    reidentified: int = 0
     line_totals: dict = field(default_factory=dict)
 
 
@@ -103,6 +110,12 @@ class CameraWorker:
         self.frame_size: tuple[int, int] | None = None
         self._stop = threading.Event()
         self._results: queue.Queue = queue.Queue(maxsize=4)
+        # Offline analysis (a file read as fast as possible) must not drop frames the way a live camera
+        # does, or counts change from run to run: capture waits for a free slot instead. The number of
+        # slots matches the inference queue limit, so no queue downstream can overflow.
+        # (realtime / stream type are part of the stream signature: changing them restarts the worker.)
+        self._offline = rc.stream_type == "file" and not rc.analytics.realtime
+        self._offline_slots = threading.Semaphore(2)
         self._lock = threading.Lock()
         self._evidence_jobs: list[EvidenceJob] = []
         self._in_meter, self._inf_meter = RateMeter(), RateMeter()
@@ -118,9 +131,54 @@ class CameraWorker:
     def _build_analytics(self) -> None:
         cfg = self.rc.analytics
         tz = local_tz()
+        old = getattr(self, "analytics", None)
         self.analytics = CameraAnalytics(self.rc.camera_id, cfg, self.rc.zones,
                                          local_time=lambda ts: datetime.fromtimestamp(ts, tz), device=self.device)
+        if old is not None:
+            # a settings change must not make the camera forget who it has already counted
+            for tr in old.flush():
+                self.db_writer.track(self.rc.camera_id, tr)
+            same_embedder = (old.reid is not None and self.analytics.reid is not None
+                             and old.reid.embedder.name == self.analytics.reid.embedder.name)
+            if same_embedder:
+                self.analytics.reid.identities = old.reid.identities
+                for ident in self.analytics.reid.identities.values():
+                    ident.active = False
+        else:
+            self._restore_identities()
         self.ring = FrameRing(cfg.evidence_pre_seconds + 1, cfg.evidence_fps)
+
+    def _restore_identities(self) -> None:
+        """Remember who was already counted before a restart (within the re-ID memory window)."""
+        reid = self.analytics.reid
+        if reid is None or reid.memory <= 0:
+            return
+        from ..analytics.reid import decode_protos
+        from ..core.timeutil import utcnow
+        from ..models import Identity
+        from datetime import timedelta
+        try:
+            with session_scope() as db:
+                rows = db.query(Identity).filter(
+                    Identity.camera_id == self.rc.camera_id, Identity.embedder == reid.embedder.name,
+                    Identity.appearance.isnot(None),
+                    Identity.last_seen_at >= utcnow() - timedelta(seconds=reid.memory)).all()
+                for r in rows:
+                    protos = decode_protos(r.appearance)
+                    if protos and all(p.shape == protos[0].shape for p in protos):
+                        reid.restore(r.root_uid, r.object_group, _epoch(r.last_seen_at), protos)
+            if rows:
+                log.info("camera %s: remembered %d identities from before the restart", self.rc.camera_id, len(rows))
+        except Exception:
+            log.exception("camera %s: could not restore re-identification memory", self.rc.camera_id)
+
+    def _remember_all(self) -> None:
+        reid = self.analytics.reid
+        if reid is None:
+            return
+        for root, ident in list(reid.identities.items()):
+            if ident.protos:
+                self.db_writer.remember(self.rc.camera_id, root, reid.embedder.name, ident.last_ts, ident.protos)
 
     def start(self) -> None:
         for t in self._threads:
@@ -133,6 +191,7 @@ class CameraWorker:
         self.flush_evidence()
         for s in self.analytics.flush():
             self.db_writer.track(self.rc.camera_id, s)
+        self._remember_all()
         if self.inference:
             self.inference.remove_camera(self.rc.camera_id)
         self.bus.clear(self.rc.camera_id)
@@ -213,9 +272,16 @@ class CameraWorker:
             if self.rc.analytics_enabled and self.inference is not None:
                 if ts - last_sample >= 1.0 / max(0.1, cfg.inference_fps) - 0.01:  # 10 ms slack for float timing
                     last_sample = ts
+                    if self._offline:
+                        while not self._stop.is_set() and not self._offline_slots.acquire(timeout=0.5):
+                            pass
+                        if self._stop.is_set():
+                            break
                     accepted = self.inference.submit(InferenceJob(rc.camera_id, ts, frame, self._on_result))
                     if not accepted:
                         self.metrics.frames_dropped += 1
+                        if self._offline:
+                            self._offline_slots.release()  # the displaced frame will never come back
             elif now - last_preview >= 1.0 / cfg.preview_fps:
                 last_preview = now
                 img = resize_to_width(frame, cfg.preview_width).copy()
@@ -281,6 +347,15 @@ class CameraWorker:
                 for c in res.crossings:
                     self.db_writer.crossing(rc.camera_id, c)
                     self.metrics.crossings += 1
+                for ident in res.identities:
+                    self.db_writer.identity(rc.camera_id, ident)
+                    self.metrics.unique_objects += 1
+                for track_uid, root_uid in res.remaps:
+                    self.db_writer.remap(rc.camera_id, track_uid, root_uid)
+                    self.metrics.reidentified += 1
+                if res.released and analytics.reid is not None:
+                    for root_uid, last_ts, protos in res.released:
+                        self.db_writer.remember(rc.camera_id, root_uid, analytics.reid.embedder.name, last_ts, protos)
                 for t in res.terminated:
                     self.db_writer.track(rc.camera_id, t)
                 if s.store_raw_detections:
@@ -295,6 +370,9 @@ class CameraWorker:
                 self._lat_ms.append((time.perf_counter() - job.submitted) * 1000)
             except Exception:
                 log.exception("camera %s: analytics step failed", self.rc.camera_id)
+            finally:
+                if self._offline:
+                    self._offline_slots.release()
 
     def _annotate(self, frame, res, highlight, rc, width: int | None = None):
         img = frame.copy()

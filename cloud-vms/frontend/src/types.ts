@@ -28,6 +28,8 @@ export interface AnalyticsConfig {
   reid_backend: "histogram" | "osnet";
   reid_window_seconds: number;
   reid_threshold: number;
+  reid_memory_seconds?: number;
+  reid_long_threshold?: number;
   evidence_pre_seconds: number;
   evidence_post_seconds: number;
   evidence_fps: number;

@@ -5,9 +5,11 @@ import logging
 import queue
 import threading
 
+from sqlalchemy import select, update
+
 from ..core.timeutil import from_epoch
 from ..db import session_scope
-from ..models import Crossing, Detection, Track
+from ..models import Camera, Crossing, Detection, Identity, Track
 
 log = logging.getLogger("vms.dbwriter")
 
@@ -40,6 +42,19 @@ class DbWriter:
                        last_seen_at=from_epoch(s.last_ts), observations=s.hits,
                        track_confidence=s.mean_confidence, trajectory=s.trajectory))
 
+    def identity(self, camera_id: int, rec) -> None:
+        self.put(Identity(camera_id=camera_id, root_uid=rec.root_uid, object_class=rec.cls,
+                          object_group=rec.group, subtype=rec.subtype or "", first_seen_at=from_epoch(rec.first_ts)))
+
+    def remap(self, camera_id: int, track_uid: int, root_uid: int) -> None:
+        """A track was re-identified as an earlier object: its crossings belong to that object."""
+        self.put(("remap", camera_id, track_uid, root_uid))
+
+    def remember(self, camera_id: int, root_uid: int, embedder: str, last_ts: float, protos) -> None:
+        """Store an identity's appearance so re-identification survives a restart."""
+        from ..analytics.reid import encode_protos
+        self.put(("remember", camera_id, root_uid, embedder, from_epoch(last_ts), encode_protos(protos[:6])))
+
     def detection(self, camera_id: int, ts: float, d, model_version: str) -> None:
         self.put(Detection(camera_id=camera_id, frame_ts=from_epoch(ts), class_name=d.cls,
                            confidence=round(d.confidence, 3), bbox=[round(v, 1) for v in d.bbox],
@@ -60,7 +75,28 @@ class DbWriter:
             return 0
         try:
             with session_scope() as db:
-                db.add_all(items)
+                # a camera deleted meanwhile: its leftover rows would come back into the statistics
+                cams = {it[1] if isinstance(it, tuple) else it.camera_id for it in items}
+                alive = set(db.scalars(select(Camera.id).where(Camera.id.in_(cams))))
+                items = [it for it in items if (it[1] if isinstance(it, tuple) else it.camera_id) in alive]
+                rows = []
+                for it in items:  # keep queue order: a remap must see the crossings queued before it
+                    if isinstance(it, tuple):
+                        db.add_all(rows)
+                        rows = []
+                        db.flush()
+                        if it[0] == "remap":
+                            _, cam, track_uid, root_uid = it
+                            db.execute(update(Crossing).where(Crossing.camera_id == cam,
+                                                              Crossing.track_uid == track_uid)
+                                       .values(root_uid=root_uid))
+                        elif it[0] == "remember":
+                            _, cam, root_uid, embedder, last_seen, appearance = it
+                            db.execute(update(Identity).where(Identity.camera_id == cam, Identity.root_uid == root_uid)
+                                       .values(embedder=embedder, last_seen_at=last_seen, appearance=appearance))
+                    else:
+                        rows.append(it)
+                db.add_all(rows)
         except Exception:
             log.exception("failed to write %d rows", len(items))
         return len(items)

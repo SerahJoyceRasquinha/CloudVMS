@@ -1,6 +1,7 @@
 """Unit tests: geometry, schedules/policies, line crossing, zone rules, tracker, event dedup."""
 from datetime import datetime
 
+import numpy as np
 import pytest
 
 from app.analytics.classes import matches_object_types
@@ -237,6 +238,67 @@ def test_pipeline_end_to_end_without_frames():
     assert [d.kind for d in decisions] == ["new"]
     assert decisions[0].candidate.event_type == "RESTRICTED_AREA_ACCESS"
     assert len(cam.flush()) == 2
+
+
+class _ColourEmbedder:
+    """Stand-in for OSNet: the mean colour of the box is the 'appearance'."""
+    name, deep = "colour", True
+
+    def embed(self, frame, bbox):
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        v = frame[y1:y2, x1:x2].reshape(-1, 3).mean(axis=0).astype(np.float32) + 1.0
+        return v / np.linalg.norm(v)
+
+
+def _scene(people):
+    img = np.zeros((1000, 1000, 3), np.uint8)
+    for (x, y), colour in people:
+        img[y - 150:y, x - 40:x + 40] = colour
+    return img
+
+
+def test_person_leaving_and_returning_is_counted_once():
+    cam = CameraAnalytics(1, AnalyticsConfig(tracker={"min_hits": 2}), [], local_time=lambda ts: NOON)
+    cam.reid.embedder = _ColourEmbedder()
+    cam.reid.memory = 900
+    red, blue = (0, 0, 220), (220, 60, 0)
+    identities = []
+
+    def run(t0, x0, colour, frames=10):
+        for i in range(frames):
+            pos = (x0 + i * 10, 500)
+            r = cam.process(t0 + i * 0.2, _scene([(pos, colour)]), [det(pos[0], pos[1])])
+            identities.extend(r.identities)
+
+    run(0, 200, red)
+    for i in range(20):  # nobody in view for a while: the track ends
+        identities.extend(cam.process(2 + i * 0.5, _scene([]), []).identities)
+    run(60, 700, red)  # same person, a minute later, somewhere else in the frame
+    for i in range(20):
+        identities.extend(cam.process(62 + i * 0.5, _scene([]), []).identities)
+    run(120, 400, blue)  # somebody else
+    assert [i.group for i in identities] == ["person", "person"]
+    assert len({i.root_uid for i in identities}) == 2
+
+
+def test_track_ids_do_not_repeat_across_restarts():
+    a = CameraAnalytics(1, AnalyticsConfig(reid_enabled=False), [])
+    b = CameraAnalytics(1, AnalyticsConfig(reid_enabled=False), [])
+    a.process(0, None, [det(100, 500)], frame_size=(1000, 1000))
+    b.process(0, None, [det(100, 500)], frame_size=(1000, 1000))
+    assert a.tracker.tracks[0].uid != b.tracker.tracks[0].uid
+
+
+def test_reid_memory_survives_restart():
+    from app.analytics.reid import ReIdentifier, decode_protos, encode_protos
+    rng = np.random.default_rng(0)
+    a, b = (v / np.linalg.norm(v) for v in rng.normal(size=(2, 512)).astype(np.float32))
+    stored = encode_protos([a])
+    fresh = ReIdentifier(_ColourEmbedder(), memory_seconds=900)
+    fresh.restore(42, "person", 100.0, decode_protos(stored))
+    assert fresh.match("person", 400.0, (500, 500), a, 1400) == 42  # same appearance after restart
+    assert fresh.match("person", 400.0, (500, 500), b, 1400) is None  # somebody else
+    assert fresh.match("vehicle", 400.0, (500, 500), a, 1400) is None  # never across groups
 
 
 if __name__ == "__main__":

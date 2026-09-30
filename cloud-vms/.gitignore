@@ -6,6 +6,7 @@ __pycache__/
 
 # Node
 frontend/node_modules/
+*.tsbuildinfo
 
 # Runtime data (database, videos, weights, secrets)
 data/*

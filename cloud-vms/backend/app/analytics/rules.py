@@ -100,6 +100,15 @@ class LineRule:
     def forget(self, uid: int) -> None:
         self.state.pop(uid, None)
 
+    def remap(self, old_root: int, new_root: int) -> None:
+        """A track was re-identified as an earlier object after it had already crossed."""
+        for direction, roots in self.counted.items():
+            if old_root in roots:
+                roots.discard(old_root)
+                if new_root in roots and self.count_once:
+                    self.totals[direction] -= 1  # the same object was counted twice
+                roots.add(new_root)
+
 
 # ============================================================ polygon zones
 @dataclass

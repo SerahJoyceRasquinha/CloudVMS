@@ -11,6 +11,7 @@ What it checks, in order - each item is installed ONLY when it is missing:
   2. PyTorch / OpenCV actually load (catches missing Windows runtime DLLs)
   3. Default detector weights  data/weights/yolo26n.pt
   4. Optional IISc UVH-26 vehicle model (tried once; never blocks start-up)
+     + OSNet re-identification weights for unique counting (never blocks start-up)
   5. Demo video               data/uploads/demo_gate.mp4
   6. Settings file            .env  (copied from .env.example)
   7. Web interface            frontend/dist/index.html (built only if missing; needs Node.js)
@@ -34,6 +35,7 @@ WEIGHTS = ROOT / "data" / "weights"
 YOLO = WEIGHTS / "yolo26n.pt"
 UVH = WEIGHTS / "UVH-26-MV-YOLOv11-S.pt"
 UVH_SKIP = WEIGHTS / ".uvh26_skipped"
+OSNET = WEIGHTS / "osnet_x0_25_msmt17.onnx"
 DEMO = ROOT / "data" / "uploads" / "demo_gate.mp4"
 ENV, ENV_EXAMPLE = ROOT / ".env", ROOT / ".env.example"
 DIST = ROOT / "frontend" / "dist" / "index.html"
@@ -252,6 +254,26 @@ def check_frontend(check_only: bool) -> bool:
     return True
 
 
+def check_osnet(check_only: bool) -> None:
+    """Re-identification weights (unique counting). Optional: without them the app falls back to
+    colour histograms, and the server retries the download when a camera starts."""
+    if OSNET.is_file() and OSNET.stat().st_size > 100_000:
+        ok(f"Re-ID model for unique counting ({OSNET.relative_to(ROOT)})")
+        return
+    todo("Re-ID model OSNet x0.25 for unique people / vehicle counts (about 1 MB, Hugging Face)")
+    if check_only:
+        return
+    try:
+        import shutil
+        from huggingface_hub import hf_hub_download
+        src = hf_hub_download("anriha/osnet_x0_25_msmt17", OSNET.name)
+        WEIGHTS.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, OSNET)
+        ok("Re-ID model downloaded")
+    except Exception as exc:
+        warn(f"Re-ID model not downloaded ({str(exc)[:120]}); retried when a camera starts.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check-only", action="store_true")
@@ -269,6 +291,7 @@ def main() -> int:
         results.append(check_imports())
         results.append(check_weights(a.check_only))
         check_uvh26(a.check_only)
+        check_osnet(a.check_only)
         results.append(check_demo(a.check_only))
     results.append(check_env(a.check_only))
     results.append(check_frontend(a.check_only))

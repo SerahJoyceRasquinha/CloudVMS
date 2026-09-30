@@ -62,7 +62,7 @@ def draw_tracks(img: np.ndarray, tracks: list[TrackView], highlight: set[int] | 
         color = (40, 40, 255) if highlight and t.uid in highlight else GROUP_COLORS.get(t.group, (200, 200, 200))
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
         name = t.cls.replace("_", "-")
-        _label(img, f"#{t.root_uid} {name} {t.confidence:.2f}", (x1, y1), color, 0.45)
+        _label(img, f"#{t.root_uid % 10000} {name} {t.confidence:.2f}", (x1, y1), color, 0.45)  # ids are long
         ax, ay = t.anchor()
         cv2.circle(img, (int(ax), int(ay)), 3, color, -1)
 

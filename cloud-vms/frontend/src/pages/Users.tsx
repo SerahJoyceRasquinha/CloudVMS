@@ -41,7 +41,7 @@ export default function Users() {
           <header><h2>Roles</h2></header>
           <div className="body grid cols-4">
             {roles.map((r) => <div key={r.id}><h3>{r.name}</h3><p className="small muted" style={{ margin: "2px 0 6px" }}>{r.description}</p>
-              <div className="small">{r.permissions.join(", ")}</div></div>)}
+              <div className="small mono muted">{r.permissions.join(", ")}</div></div>)}
           </div>
         </section>
       )}
@@ -56,7 +56,7 @@ export default function Users() {
             <table>
               <thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Target</th><th>Details</th><th>IP</th></tr></thead>
               <tbody>{audit.items.map((a) => (
-                <tr key={a.id}><td className="num small">{fmtTime(a.ts)}</td><td>{a.username || "—"}</td><td>{a.action}</td>
+                <tr key={a.id}><td className="time small">{fmtTime(a.ts)}</td><td>{a.username || "—"}</td><td>{a.action}</td>
                   <td className="small">{a.target_type} {a.target_id}</td><td className="small muted" style={{ maxWidth: 380 }}>{JSON.stringify(a.details)}</td><td className="small muted">{a.ip}</td></tr>
               ))}</tbody>
             </table>

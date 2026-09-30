@@ -5,8 +5,10 @@ Definitions (documented so the numbers can be defended in a report):
   short-term re-identification) that crossed a counting line in the "in" /
   "out" direction. One person counts once per direction per camera even if
   they hover around the line. Cross-camera identity is *not* assumed.
-* **Unique objects seen** — distinct root tracks confirmed at a camera
-  (used when no counting line is configured).
+* **Unique objects seen** — distinct identities at a camera after
+  re-identification (OSNet appearance matching): somebody who leaves the
+  frame and comes back within the re-ID memory counts once. An identity is
+  stored the moment it is decided, so the numbers update live.
 * **On-site estimate** — entries minus exits since the start of the period;
   an estimate only, it drifts if an exit happens off-camera.
 """
@@ -19,7 +21,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.timeutil import iso_z, to_local, utcnow
-from ..models import Camera, CameraHealth, Crossing, Event, EventEvidence, RecordingSegment, Track, Zone
+from ..models import (Camera, CameraHealth, Crossing, Event, EventEvidence, Identity, RecordingSegment, Track,
+                      Zone)
 
 OPEN_STATUSES = ("NEW", "ACKNOWLEDGED", "INVESTIGATING")
 
@@ -43,11 +46,20 @@ def unique_crossings(db: Session, start: datetime, end: datetime, camera_ids) ->
 
 
 def unique_seen(db: Session, start: datetime, end: datetime, camera_ids) -> list[tuple]:
+    """(camera_id, group, class, first_seen) per unique object."""
+    seen = {}
+    q = select(Identity.camera_id, Identity.root_uid, Identity.object_group, Identity.object_class,
+               Identity.first_seen_at).where(Identity.first_seen_at >= start, Identity.first_seen_at < end)
+    for cam, root, group, cls, ts in db.execute(_scope(q, Identity.camera_id, camera_ids)):
+        seen.setdefault((cam, root), (group, cls, ts))
+    # periods recorded before identities existed: fall back to the finished tracks of that time
+    first_ident = dict(db.execute(_scope(select(Identity.camera_id, func.min(Identity.first_seen_at))
+                                         .group_by(Identity.camera_id), Identity.camera_id, camera_ids)).all())
     q = select(Track.camera_id, Track.root_uid, Track.object_group, Track.object_class, Track.first_seen_at) \
         .where(Track.first_seen_at >= start, Track.first_seen_at < end)
-    q = _scope(q, Track.camera_id, camera_ids)
-    seen = {}
-    for cam, root, group, cls, ts in db.execute(q):
+    for cam, root, group, cls, ts in db.execute(_scope(q, Track.camera_id, camera_ids)):
+        if cam in first_ident and ts >= first_ident[cam]:
+            continue
         seen.setdefault((cam, root), (group, cls, ts))
     return [(k[0], *v) for k, v in seen.items()]
 
@@ -56,6 +68,8 @@ def summary(db: Session, start: datetime, end: datetime, camera_ids, live: dict 
     cams_q = _scope(select(Camera), Camera.id, camera_ids)
     cams = list(db.scalars(cams_q))
     cam_ids = [c.id for c in cams]
+    # only cameras that exist: rows left behind by a deleted camera must never be counted
+    camera_ids = cam_ids
     stale = utcnow() - timedelta(seconds=30)
 
     def eff_status(c: Camera) -> str:

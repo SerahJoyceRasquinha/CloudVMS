@@ -30,9 +30,9 @@ export default function Analytics() {
       {s && (<>
         <section className="panel">
           <div className="stat-row">
-            <div className="stat"><b style={{ color: "var(--people)" }}>{lines ? s.people.entries : s.people.unique_seen}</b><span>people {lines ? "entered" : "seen"}</span></div>
+            <div className="stat"><b>{lines ? s.people.entries : s.people.unique_seen}</b><span>people {lines ? "entered" : "seen"}</span></div>
             <div className="stat"><b>{s.people.exits}</b><span>people exited</span></div>
-            <div className="stat"><b style={{ color: "var(--vehicles)" }}>{lines ? s.vehicles.entries : s.vehicles.unique_seen}</b><span>vehicles {lines ? "entered" : "seen"}</span></div>
+            <div className="stat"><b>{lines ? s.vehicles.entries : s.vehicles.unique_seen}</b><span>vehicles {lines ? "entered" : "seen"}</span></div>
             <div className="stat"><b>{s.vehicles.exits}</b><span>vehicles exited</span></div>
           </div>
         </section>

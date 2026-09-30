@@ -60,3 +60,10 @@ def session_scope() -> Iterator[Session]:
 def init_db() -> None:
     from . import models  # noqa: F401  (register tables)
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "postgresql":
+        # tracker ids became 64-bit (unique across restarts); widen columns of databases created earlier
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            for table, col in (("tracks", "track_uid"), ("tracks", "root_uid"), ("crossings", "track_uid"),
+                               ("crossings", "root_uid"), ("events", "track_id")):
+                conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {col} TYPE BIGINT"))

@@ -7,6 +7,7 @@ import jwt
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
+from .core.config import get_settings
 from .core.errors import AppError, forbidden, not_found
 from .core.security import decode_token
 from .db import get_db
@@ -14,8 +15,13 @@ from .models import Camera, User
 
 
 def client_ip(request: Request) -> str:
+    """The caller's IP. X-Forwarded-For is only believed when the direct peer is a configured
+    trusted proxy; otherwise anyone could fake a new IP per request and dodge the login rate limit."""
+    peer = request.client.host if request.client else ""
     fwd = request.headers.get("x-forwarded-for")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "")
+    if fwd and peer in get_settings().trusted_proxies:
+        return fwd.split(",")[-1].strip()  # the address our proxy saw (earlier entries are client-supplied)
+    return peer
 
 
 def _user_from_token(db: Session, token: str, typ: str) -> tuple[User, dict]:
@@ -41,6 +47,10 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 def require(*perms: str) -> Callable:
     def dep(user: User = Depends(get_current_user)) -> User:
+        # an initial / admin-reset password must be replaced before anything else is allowed
+        # (/auth/me, /auth/logout and /auth/change-password use get_current_user and stay reachable)
+        if user.must_change_password:
+            raise AppError(403, "password_change_required", "Choose a new password before continuing")
         missing = [p for p in perms if p not in user.permissions]
         if missing:
             raise forbidden(f"Missing permission: {', '.join(missing)}")

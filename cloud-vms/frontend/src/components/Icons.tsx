@@ -16,10 +16,10 @@ export const Icon = {
 
 export function Logo() {
   return (
-    <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
-      <rect width="32" height="32" rx="7" fill="#1f2f52" />
-      <path d="M7 24V11l9-5 9 5v13" stroke="#E8A33D" strokeWidth="3" fill="none" strokeLinejoin="round" />
-      <circle cx="16" cy="17" r="3.5" fill="#E8A33D" />
+    <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="5" fill="#1c1b18" />
+      <path d="M8 24V12l8-4.5 8 4.5v12" stroke="#d99a2b" strokeWidth="2.5" fill="none" strokeLinejoin="round" />
+      <path d="M8 24h16" stroke="#d99a2b" strokeWidth="2.5" />
     </svg>
   );
 }

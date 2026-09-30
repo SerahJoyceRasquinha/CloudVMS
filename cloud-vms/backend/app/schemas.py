@@ -98,6 +98,8 @@ class AnalyticsSettings(BaseModel):
     reid_backend: Optional[Literal["histogram", "osnet"]] = None
     reid_window_seconds: Optional[float] = Field(default=None, ge=0, le=120)
     reid_threshold: Optional[float] = Field(default=None, ge=0.3, le=0.99)
+    reid_memory_seconds: Optional[float] = Field(default=None, ge=0, le=86400)
+    reid_long_threshold: Optional[float] = Field(default=None, ge=0.5, le=0.99)
     evidence_pre_seconds: Optional[float] = Field(default=None, ge=0, le=60)
     evidence_post_seconds: Optional[float] = Field(default=None, ge=1, le=120)
     evidence_fps: Optional[float] = Field(default=None, ge=1, le=30)

@@ -1,6 +1,7 @@
 // Tiny API client: attaches the session token, turns error bodies into readable messages.
 
 const TOKEN_KEY = "vms.token";
+const REQUEST_TIMEOUT_MS = 20000;
 
 export class ApiError extends Error {
   status: number;
@@ -48,12 +49,19 @@ export async function api<T = any>(method: string, path: string, body?: unknown,
     headers["Content-Type"] = "application/json";
     payload = JSON.stringify(body);
   }
+  // uploads may take long; everything else gives up after a while so a stuck request can't freeze a page
+  const ctrl = new AbortController();
+  const timer = body instanceof FormData ? undefined : setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(`/api${path}${qs(query)}`, { method, headers, body: payload });
+    res = await fetch(`/api${path}${qs(query)}`, { method, headers, body: payload, signal: ctrl.signal });
   } catch {
-    throw new ApiError(0, "network", "Can't reach the server. Check that the backend is running.");
+    clearTimeout(timer);
+    throw ctrl.signal.aborted
+      ? new ApiError(0, "timeout", "The server took too long to answer. Retrying automatically.")
+      : new ApiError(0, "network", "Can't reach the server. Check that the backend is running.");
   }
+  clearTimeout(timer);
   if (res.status === 401 && path !== "/auth/login") onUnauthorized();
   const type = res.headers.get("content-type") || "";
   const data = type.includes("application/json") ? await res.json() : await res.text();

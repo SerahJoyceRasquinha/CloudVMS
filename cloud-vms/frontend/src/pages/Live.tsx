@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { get, post } from "../api";
+import { get, getToken, post } from "../api";
 import { useAuth } from "../auth";
 import { Empty, ErrorBox, StatusBadge, useToast } from "../components/ui";
 import { fmtAgo, useLoad } from "../hooks";
@@ -32,20 +32,9 @@ export default function Live() {
 }
 
 function LiveTile({ cam, onFocus, canControl, onChanged }: { cam: Camera; onFocus: () => void; canControl: boolean; onChanged: () => void }) {
-  const [src, setSrc] = useState<string | null>(null);
   const [mode, setMode] = useState<"analytics" | "hls">("analytics");
-  const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const toast = useToast();
-  const imgRef = useRef<HTMLImageElement>(null);
-
-  const connect = async () => {
-    try {
-      const r = await post<{ mjpeg_url: string; live_url: string | null }>(`/cameras/${cam.id}/live-token`);
-      setSrc(`${r.mjpeg_url}&t=${Date.now()}`);
-      setLiveUrl(r.live_url);
-    } catch { setSrc(null); }
-  };
-  useEffect(() => { if (cam.enabled) connect(); else setSrc(null); /* eslint-disable-next-line */ }, [cam.id, cam.enabled]);
+  const liveUrl = cam.live_url || null;
 
   const toggle = async () => {
     try {
@@ -60,8 +49,7 @@ function LiveTile({ cam, onFocus, canControl, onChanged }: { cam: Camera; onFocu
       <div className="frame">
         {!cam.enabled ? <span>Stream stopped</span>
           : mode === "hls" && liveUrl ? <HlsPlayer url={liveUrl} />
-          : src ? <img ref={imgRef} src={src} alt={`Live view of ${cam.name}`} onError={() => setTimeout(connect, 3000)} />
-          : <span>Connecting</span>}
+          : <LiveFrame cameraId={cam.id} alt={`Live view of ${cam.name}`} />}
       </div>
       <footer>
         <b>{cam.name}</b><StatusBadge status={cam.enabled ? cam.status : "DISABLED"} />
@@ -73,6 +61,59 @@ function LiveTile({ cam, onFocus, canControl, onChanged }: { cam: Camera; onFocu
       </footer>
     </article>
   );
+}
+
+/** Annotated live frames, fetched one at a time (long-poll) rather than as an MJPEG stream.
+ * An <img> showing MJPEG keeps its connection open after the page is left, and browsers allow only
+ * 6 connections per server: a few visits to Live view used to leave every later request queued
+ * ("Loading cameras" forever). Here every request is short and is cancelled on unmount. */
+function LiveFrame({ cameraId, alt }: { cameraId: number; alt: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    let stopped = false;
+    let ctrl: AbortController | null = null;
+    let current: string | null = null;
+    let after = 0;
+    let failures = 0;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const run = async () => {
+      while (!stopped) {
+        if (document.visibilityState !== "visible") { await sleep(500); continue; }
+        ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl?.abort(), 8000);
+        try {
+          const res = await fetch(`/api/live/${cameraId}/frame?after=${after}&wait=1`, {
+            headers: { Authorization: `Bearer ${getToken()}` }, signal: ctrl.signal, cache: "no-store",
+          });
+          if (!res.ok) throw new Error(String(res.status));
+          const ts = parseFloat(res.headers.get("X-Frame-Ts") || "0");
+          const blob = await res.blob();
+          if (stopped) break;
+          if (ts !== after || !current) {
+            after = ts;
+            const next = URL.createObjectURL(blob);
+            setUrl(next);
+            if (current) URL.revokeObjectURL(current);
+            current = next;
+          }
+          failures = 0;
+          setStalled(false);
+        } catch {
+          if (stopped) break;
+          failures += 1;
+          if (failures >= 3) setStalled(true);
+          await sleep(Math.min(5000, 500 * failures));
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    };
+    run();
+    return () => { stopped = true; ctrl?.abort(); if (current) URL.revokeObjectURL(current); };
+  }, [cameraId]);
+  if (!url) return <span>{stalled ? "Reconnecting" : "Connecting"}</span>;
+  return <img src={url} alt={alt} style={stalled ? { opacity: 0.5 } : undefined} />;
 }
 
 function HlsPlayer({ url }: { url: string }) {

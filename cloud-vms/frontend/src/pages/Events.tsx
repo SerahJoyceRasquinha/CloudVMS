@@ -75,7 +75,7 @@ export default function Events() {
                 <tbody>
                   {data?.items.map((e) => (
                     <tr key={e.id} className="clickable" onClick={() => open(e.id)}>
-                      <td className="num" style={{ whiteSpace: "nowrap" }}>{fmtTime(e.event_timestamp)}</td>
+                      <td className="time">{fmtTime(e.event_timestamp)}</td>
                       <td>{eventLabel(e.event_type)}</td>
                       <td>{e.title}{(e.metadata?.object_count || 1) > 1 && <span className="muted"> ({e.metadata.object_count} objects)</span>}</td>
                       <td>{e.camera_name}{e.zone_name && <div className="small muted">{e.zone_name}</div>}</td>
@@ -97,9 +97,10 @@ export default function Events() {
 }
 
 function Th({ k, sort, onSort, children }: { k: string; sort: { key: string; order: string }; onSort: (k: string) => void; children: string }) {
-  return <th><button className="btn-quiet" style={{ padding: 0, fontWeight: 600, fontSize: 12.5 }} onClick={() => onSort(k)}
-    aria-sort={sort.key === k ? (sort.order === "asc" ? "ascending" : "descending") : "none"}>
-    {children}{sort.key === k ? (sort.order === "asc" ? " ▲" : " ▼") : ""}</button></th>;
+  const active = sort.key === k;
+  return <th aria-sort={active ? (sort.order === "asc" ? "ascending" : "descending") : "none"}>
+    <button className={`th-sort${active ? " active" : ""}`} onClick={() => onSort(k)}>
+      {children}{active && <span aria-hidden="true">{sort.order === "asc" ? "↑" : "↓"}</span>}</button></th>;
 }
 
 function MultiSelect({ label, value, onChange, options }: { label: string; value: string[]; onChange: (v: string[]) => void; options: [string, string][] }) {

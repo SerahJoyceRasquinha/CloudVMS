@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ..core.timeutil import iso_z, local_day_bounds_utc, to_local, utcnow
 from ..db import get_db
 from ..deps import get_camera_for, require, scoped_camera_ids
-from ..models import CameraHealth, PerfRun, User
+from ..models import Camera, CameraHealth, PerfRun, User
 from ..services import stats_service
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
@@ -65,7 +65,9 @@ def export_crossings(start: Optional[datetime] = None, end: Optional[datetime] =
                      camera_id: list[int] = Query(default=[]), user: User = Depends(require("analytics:view")),
                      db: Session = Depends(get_db)):
     s, e = _range(start, end)
-    rows = stats_service.unique_crossings(db, s, e, _camera_filter(user, camera_id))
+    wanted = _camera_filter(user, camera_id)
+    existing = [c for c in db.scalars(select(Camera.id)) if wanted is None or c in wanted]  # not deleted ones
+    rows = stats_service.unique_crossings(db, s, e, existing)
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["timestamp_local", "timestamp_utc", "camera_id", "group", "class", "model_label", "direction"])

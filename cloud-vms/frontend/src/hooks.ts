@@ -1,33 +1,50 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { post } from "./api";
 
-/** Load data, optionally re-polling every `intervalMs`. Returns [data, error, reload, loading]. */
+/** Load data, optionally re-polling every `intervalMs`.
+ * Polls never overlap (a slow server isn't flooded), a response for old `deps` never overwrites
+ * newer data, and nothing is updated after the page is left. */
 export function useLoad<T>(fn: () => Promise<T>, deps: unknown[], intervalMs?: number) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const fnRef = useRef(fn);
   fnRef.current = fn;
-  const reload = useCallback(async () => {
+  const gen = useRef(0); // bumped when deps change or the component unmounts
+  const inflight = useRef(false);
+  const reload = useCallback(async (poll = false) => {
+    if (poll && inflight.current) return;
+    const g = gen.current;
+    inflight.current = true;
     try {
       const d = await fnRef.current();
+      if (g !== gen.current) return;
       setData(d);
       setError(null);
+      setUpdatedAt(Date.now());
     } catch (e) {
-      setError(e);
+      if (g === gen.current) setError(e);
     } finally {
-      setLoading(false);
+      if (g === gen.current) { inflight.current = false; setLoading(false); }
     }
   }, []);
   useEffect(() => {
+    gen.current += 1;
+    inflight.current = false;
     setLoading(true);
     reload();
-    if (!intervalMs) return;
-    const t = setInterval(() => { if (document.visibilityState === "visible") reload(); }, intervalMs);
-    return () => clearInterval(t);
+    const t = intervalMs
+      ? setInterval(() => { if (document.visibilityState === "visible") reload(true); }, intervalMs)
+      : undefined;
+    // refresh straight away when the browser tab becomes visible again
+    const onVisible = () => { if (intervalMs && document.visibilityState === "visible") reload(true); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { gen.current += 1; clearInterval(t); document.removeEventListener("visibilitychange", onVisible); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
-  return { data, error, reload, loading, setData };
+  const manualReload = useCallback(() => reload(false), [reload]);
+  return { data, error, reload: manualReload, loading, setData, updatedAt };
 }
 
 export interface LiveIncident {

@@ -10,11 +10,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from starlette.datastructures import Headers, MutableHeaders
+from sqlalchemy import select, update
 
 from .api import admin, analytics, auth, cameras, events, live, models_api, recordings, zones
 from .core.config import get_settings
@@ -22,8 +23,9 @@ from .core.errors import install_error_handlers
 from .core.logging import request_id_var, setup_logging
 from .core.permissions import ROLE_PERMISSIONS
 from .core.security import hash_password
+from .core.timeutil import utcnow
 from .db import init_db, session_scope
-from .models import Role, User
+from .models import Dataset, Role, TrainingJob, User
 from .services.model_registry import seed_models
 
 log = logging.getLogger("vms")
@@ -55,12 +57,30 @@ def bootstrap() -> None:
                         "VMS_ADMIN_PASSWORD" if s.admin_password else "data/initial_admin_password.txt")
     with session_scope() as db:
         seed_models(db)
+    with session_scope() as db:
+        from .services.camera_service import purge_orphaned_data
+        removed = purge_orphaned_data(db)
+        if removed:
+            log.warning("removed statistics of deleted cameras: %s", removed)
+    with session_scope() as db:
+        # training / dataset imports run as threads of the API process: anything still marked as
+        # running at start-up died with the previous process and would block new jobs forever
+        stale = db.execute(update(TrainingJob).where(TrainingJob.status.in_(["queued", "running"]))
+                           .values(status="failed", finished_at=utcnow())).rowcount
+        stale += db.execute(update(Dataset).where(Dataset.status == "processing")
+                            .values(status="failed", stats={"error": "interrupted by a server restart"})).rowcount
+        if stale:
+            log.warning("marked %d interrupted training job(s) / dataset import(s) as failed", stale)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     s = get_settings()
     setup_logging(json_logs=s.environment == "production")
+    # every plain `def` endpoint runs on this pool (default 40 threads); slow requests piling up while
+    # the dashboard polls must not leave the whole API waiting for a free thread
+    import anyio.to_thread
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 100
     bootstrap()
     if s.embedded_workers:
         from .workers.supervisor import start_supervisor
@@ -72,6 +92,37 @@ async def lifespan(_: FastAPI):
         stop_supervisor()
 
 
+class CorrelationIdMiddleware:
+    """Request id + timing headers. Plain ASGI (not BaseHTTPMiddleware), so streaming responses
+    (incident feed, live video) pass straight through and client disconnects are seen at once."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        rid = Headers(scope=scope).get("x-request-id", "")[:64] or uuid.uuid4().hex[:16]
+        token = request_id_var.set(rid)
+        t0 = time.perf_counter()
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                message["headers"] = list(message.get("headers") or [])
+                h = MutableHeaders(scope=message)
+                h["X-Request-ID"] = rid
+                h["X-Response-Time-ms"] = f"{(time.perf_counter() - t0) * 1000:.1f}"
+                if "x-content-type-options" not in h:
+                    h["X-Content-Type-Options"] = "nosniff"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_headers)
+        finally:
+            request_id_var.reset(token)
+
+
 def create_app() -> FastAPI:
     s = get_settings()
     app = FastAPI(title="Cloud VMS API", version="1.0.0", lifespan=lifespan,
@@ -81,19 +132,7 @@ def create_app() -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_credentials=False,
                        allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Request-ID"])
 
-    @app.middleware("http")
-    async def correlation_id(request: Request, call_next):
-        rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
-        token = request_id_var.set(rid)
-        t0 = time.perf_counter()
-        try:
-            response = await call_next(request)
-        finally:
-            request_id_var.reset(token)
-        response.headers["X-Request-ID"] = rid
-        response.headers["X-Response-Time-ms"] = f"{(time.perf_counter() - t0) * 1000:.1f}"
-        response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        return response
+    app.add_middleware(CorrelationIdMiddleware)
 
     for r in (auth.router, cameras.router, live.router, zones.router, events.router, recordings.router,
               analytics.router, admin.router, models_api.router):

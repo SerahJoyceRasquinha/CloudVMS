@@ -21,7 +21,7 @@
                     │  detections in canonical classes
                     ▼
           Analytics thread (per camera)
-            rider suppression → ByteTrack-style tracker → short-term re-ID
+            rider suppression → ByteTrack-style tracker → OSNet re-ID (identities)
                     │  tracks (ground point = bottom-centre of box)
             ┌───────┴──────────────────────────────┐
             │ Line rules: unique in/out crossings  │ Polygon rules: intrusion, restricted access,
@@ -85,9 +85,17 @@ they don't require the object to have crossed in from outside.
 **Policy evaluation** (`analytics/policy.py`): matching *allow* rules win, then *alert* rules,
 then the zone's default. Schedules support overnight windows.
 
-**Unique counting**: one count per root track per direction per line. Root tracks come from the
-tracker plus short-term appearance re-ID (same camera, ≤ 8 s gap, nearby position), so a person
-briefly hidden behind a bus isn't counted twice. People are never matched across cameras.
+**Unique counting**: one count per identity per direction per line, and one "seen" count per
+identity. When a track is confirmed, a few OSNet x0.25 (MSMT17) appearance embeddings are collected
+(`analytics/reid.py`, ONNX run by OpenCV DNN, ~15 ms per crop on a laptop CPU) and compared with the
+identities the camera already knows:
+short-term (≤ 8 s gap, near where the object was lost, similarity ≥ 0.65) for occlusions, and
+long-term (anywhere in the frame, up to `reid_memory_seconds`, default 30 min, similarity ≥ 0.75) for
+somebody who left and came back. A match inherits the earlier identity and is not counted again.
+Identities (with their appearance, float16) are stored in the `identities` table the moment they
+are decided, so counts update live and the memory survives a restart. People are never matched
+across cameras. On the college gate video, replaying the same 5 minutes a second time added 1
+person (40 -> 41), where the previous colour-histogram re-ID counted everyone again (47 -> 94).
 
 **Rider suppression**: a person box whose feet lie on a two-wheeler/bicycle box is a rider, not a
 pedestrian (UVH-26 labels include the rider in the two-wheeler box).
@@ -121,9 +129,12 @@ keys and metadata (size, duration, SHA-256, retention date), never video bytes.
 
 * Counting accuracy depends on camera angle: a line where people cross clearly works far better
   than one where crowds overlap. Measure it on your footage (`eval_events.py` with manual counts).
-* Appearance re-ID can merge two people wearing very similar clothes within a few seconds.
+* Appearance re-ID can merge two people wearing very similar clothes (e.g. uniforms), which
+  under-counts; raise `reid_long_threshold` or lower `reid_memory_seconds` if that happens.
+  OSNet is trained on people; vehicles are matched with the same features, which works less well.
 * The on-site estimate drifts when people leave through gates without cameras.
 * SQLite is fine for one machine; use PostgreSQL for several workers.
-* Live preview is MJPEG of analysed frames (smooth enough at 5–8 fps); for full-frame-rate raw
+* Live preview shows the analysed frames, fetched one at a time by the dashboard (`/api/live/{id}/frame`,
+  long-poll; an MJPEG endpoint also exists for other clients) — smooth enough at 5–8 fps; for full-frame-rate raw
   video use MediaMTX (HLS/WebRTC) and fill in the camera's raw stream URL.
 * Timestamps of uploaded video files are the replay time (they behave like a live camera).

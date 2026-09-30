@@ -30,9 +30,13 @@ class AnalyticsConfig:
     rider_suppression: bool = True
     rider_ioa: float = 0.3
     reid_enabled: bool = True
-    reid_backend: str = "histogram"  # histogram | osnet
-    reid_window_seconds: float = 8.0
-    reid_threshold: float = 0.8
+    reid_backend: str = "osnet"  # osnet (deep re-ID, default) | histogram (colour only, short-term)
+    reid_window_seconds: float = 8.0  # short-term: occlusions, near where the object was lost
+    reid_threshold: float = 0.65  # short-term similarity (histogram backend uses at least 0.8)
+    reid_memory_seconds: float = 1800.0  # long-term: somebody who left the frame and came back
+    reid_long_threshold: float = 0.75
+    reid_samples: int = 3  # appearance samples collected before a track's identity is decided
+    min_identity_hits: int = 3  # shorter-lived tracks are treated as noise and not counted
     tracker: dict = field(default_factory=dict)
     events: dict = field(default_factory=dict)
     evidence_pre_seconds: float = 5.0
@@ -69,6 +73,17 @@ class TrackSummary:
 
 
 @dataclass
+class IdentityRecord:
+    """A new unique object (person / vehicle) at this camera."""
+    root_uid: int
+    track_uid: int
+    cls: str
+    group: str
+    subtype: str
+    first_ts: float
+
+
+@dataclass
 class FrameResult:
     ts: float
     tracks: list[TrackView]
@@ -80,6 +95,9 @@ class FrameResult:
     line_totals: dict[int, dict]
     detections: list[Detection]
     tracker_ms: float = 0.0
+    identities: list[IdentityRecord] = field(default_factory=list)  # newly counted unique objects
+    remaps: list[tuple[int, int]] = field(default_factory=list)  # (track_uid, root_uid) re-identified late
+    released: list[tuple] = field(default_factory=list)  # (root_uid, last_ts, prototypes) to remember
 
 
 def suppress_riders(dets: list[Detection], min_ioa: float) -> list[Detection]:
@@ -107,14 +125,22 @@ def suppress_riders(dets: list[Detection], min_ioa: float) -> list[Detection]:
 
 class CameraAnalytics:
     def __init__(self, camera_id: int, config: AnalyticsConfig, zones: list[ZoneSpec],
-                 local_time=None, device: str = "cpu"):
+                 local_time=None, device: str = "cpu", start_uid: int | None = None):
         self.camera_id = camera_id
         self.cfg = config
         self.local_time = local_time or (lambda ts: datetime.fromtimestamp(ts))
-        self.tracker = ByteTracker(TrackerConfig.from_dict(config.tracker))
+        # IDs are unique across restarts (microsecond start), so counts stored by root id never collide
+        self.tracker = ByteTracker(TrackerConfig.from_dict(config.tracker), start_uid=start_uid or _session_uid())
         self.engine = EventEngine(camera_id, EngineConfig.from_dict(config.events))
-        self.reid = (ReIdentifier(make_embedder(config.reid_backend, device), config.reid_window_seconds,
-                                  config.reid_threshold) if config.reid_enabled else None)
+        self.reid: ReIdentifier | None = None
+        if config.reid_enabled:
+            emb = make_embedder(config.reid_backend, device)
+            short = config.reid_threshold if getattr(emb, "deep", False) else max(config.reid_threshold, 0.8)
+            self.reid = ReIdentifier(emb, config.reid_window_seconds, short,
+                                     memory_seconds=config.reid_memory_seconds,
+                                     long_threshold=config.reid_long_threshold)
+        self._pending: dict[int, list[np.ndarray]] = {}  # confirmed tracks whose identity isn't decided yet
+        self._decided: set[int] = set()
         self.zones = zones
         self.size: tuple[int, int] | None = None
         self.lines: list[LineRule] = []
@@ -142,7 +168,8 @@ class CameraAnalytics:
             w, h = frame_size or (1920, 1080)
         self._ensure_size(w, h)
         self._frame_i += 1
-        dets = detections
+        # the detector is shared by all cameras (fixed low threshold); apply this camera's own setting
+        dets = [d for d in detections if d.confidence >= self.cfg.detector_conf]
         if self.cfg.classes:
             dets = [d for d in dets if matches_object_types(self.cfg.classes, d.cls)]
         if self.cfg.rider_suppression:
@@ -151,33 +178,8 @@ class CameraAnalytics:
         out = self.tracker.update(dets, ts)
         diag = math.hypot(w, h)
 
-        # appearance: refresh embeddings every few observations
-        if self.reid is not None and frame is not None:
-            for tv in out.tracks:
-                tr = self.tracker.get(tv.uid)
-                if tr is not None and (tr.appearance is None or tr.hits % 5 == 0):
-                    emb = self.reid.embedder.embed(frame, tv.bbox)
-                    if emb is not None:
-                        tr.appearance = emb if tr.appearance is None else _blend(tr.appearance, emb)
-
-        # short-term re-identification for freshly confirmed tracks
-        if self.reid is not None and out.confirmed_now:
-            active_roots = {t.root_uid for t in out.tracks if t.uid not in out.confirmed_now}
-            for uid in out.confirmed_now:
-                tr = self.tracker.get(uid)
-                if tr is None or tr.appearance is None:
-                    continue
-                # candidates: recently terminated (gallery) + currently LOST tracks
-                best_root = self.reid.match(tr.group, tr.first_ts, tr.last_bbox, tr.appearance, diag,
-                                            exclude_roots=active_roots)
-                lost_match = self._match_lost(tr, diag, active_roots)
-                if lost_match is not None:
-                    best_root = lost_match
-                if best_root is not None:
-                    tr.root_uid = best_root
-                    for i, tv in enumerate(out.tracks):
-                        if tv.uid == uid:
-                            out.tracks[i] = tr.view(True)
+        # identity: every confirmed track is either re-identified as somebody seen before or counted once
+        identities, remaps, released = self._identify(out, frame, ts, diag)
 
         crossings: list[CrossingRecord] = []
         candidates = []
@@ -196,42 +198,101 @@ class CameraAnalytics:
         for tr in out.terminated:
             for rule in (*self.lines, *self.polys):
                 rule.forget(tr.uid)
-            if self.reid is not None and tr.appearance is not None:
-                self.reid.remember(tr.root_uid or tr.uid, tr.group, tr.last_ts, tr.last_bbox, tr.appearance)
+            if tr.uid in self._pending:  # ended before its identity was decided
+                rec = self._decide(tr, ts, diag, set(), remaps, final=True)
+                if rec:
+                    identities.append(rec)
+            if self.reid is not None and not tr.retired:  # a retired track's identity lives on elsewhere
+                root = tr.root_uid or tr.uid
+                self.reid.release(root, tr.last_ts, tr.last_bbox)
+                snap = self.reid.snapshot(root)
+                if snap:
+                    released.append((root, *snap))
+            self._decided.discard(tr.uid)
             summaries.append(self._summary(tr, w, h))
 
         decisions = [self.engine.decide(c) for c in candidates]
         if self._frame_i % 100 == 0:
             self.engine.prune(ts)
+            if self.reid is not None:
+                self.reid.prune(ts)
         return FrameResult(
             ts=ts, tracks=out.tracks, lost=out.lost, crossings=crossings, decisions=decisions,
             terminated=summaries,
             zone_occupancy={p.zone.id: p.occupancy for p in self.polys},
             line_totals={lr.zone.id: dict(lr.totals) for lr in self.lines},
-            detections=dets, tracker_ms=(time.perf_counter() - t0) * 1000)
+            detections=dets, tracker_ms=(time.perf_counter() - t0) * 1000,
+            identities=identities, remaps=remaps, released=released)
 
-    def _match_lost(self, tr, diag: float, exclude_roots: set[int]) -> int | None:
-        best, best_sim = None, self.reid.threshold
-        x1, y1, x2, y2 = tr.last_bbox
-        start = ((x1 + x2) / 2, y2)
+    # ------------------------------------------------------------ identity
+    def _identify(self, out, frame, ts: float, diag: float):
+        identities: list[IdentityRecord] = []
+        remaps: list[tuple[int, int]] = []
+        remember: list[tuple] = []  # appearance of freshly decided identities (saved at once: survives a crash)
+        for uid in out.confirmed_now:
+            if uid not in self._decided:
+                self._pending.setdefault(uid, [])
+        visible_roots = {t.root_uid for t in out.tracks if t.uid in self._decided}
+        for i, tv in enumerate(out.tracks):
+            tr = self.tracker.get(tv.uid)
+            if tr is None:
+                continue
+            pending = tr.uid in self._pending
+            emb = None
+            # sample appearance every frame while undecided, then now and then to learn other views
+            if self.reid is not None and frame is not None and (pending or tr.hits % 5 == 0):
+                emb = self.reid.embedder.embed(frame, tv.bbox)
+            if pending:
+                if emb is not None:
+                    self._pending[tr.uid].append(emb)
+                enough = len(self._pending[tr.uid]) >= max(1, self.cfg.reid_samples)
+                if self.reid is None or enough or ts - tr.first_ts >= 2.0:
+                    rec = self._decide(tr, ts, diag, visible_roots, remaps)
+                    if rec:
+                        identities.append(rec)
+                    visible_roots.add(tr.root_uid or tr.uid)
+                    snap = self.reid.snapshot(tr.root_uid) if self.reid is not None else None
+                    if snap:
+                        remember.append((tr.root_uid, *snap))
+                    out.tracks[i] = tr.view(True)
+            elif self.reid is not None and emb is not None:
+                self.reid.observe(tr.root_uid or tr.uid, tr.group, ts, tv.bbox, emb)
+        return identities, remaps, remember
+
+    def _decide(self, tr, ts: float, diag: float, busy_roots: set[int], remaps: list, final: bool = False):
+        """Link a track to an earlier identity, or register it as a new unique object."""
+        embs = self._pending.pop(tr.uid, [])
+        self._decided.add(tr.uid)
+        mean = _mean_embedding(embs)
+        root = None
+        if self.reid is not None and mean is not None:
+            start = (tr.trajectory[0][1], tr.trajectory[0][2]) if tr.trajectory else _foot(tr.last_bbox)
+            root = self.reid.match(tr.group, tr.first_ts, start, mean, diag, exclude_roots=busy_roots)
+        new = None
+        if root is not None and root != tr.uid:
+            old = tr.root_uid or tr.uid
+            tr.root_uid = root
+            remaps.append((tr.uid, root))
+            for lr in self.lines:
+                lr.remap(old, root)
+            self._retire_lost(root, tr.uid)
+        else:
+            tr.root_uid = tr.uid
+            if final and tr.hits < self.cfg.min_identity_hits:
+                return None  # a flicker, not an object: not counted
+            new = IdentityRecord(tr.uid, tr.uid, tr.cls, tr.group, tr.subtype, tr.first_ts)
+        if self.reid is not None:
+            for e in embs:
+                self.reid.observe(tr.root_uid, tr.group, ts, tr.last_bbox, e)
+            if not embs:
+                self.reid.observe(tr.root_uid, tr.group, ts, tr.last_bbox, None)
+        return new
+
+    def _retire_lost(self, root: int, keep_uid: int) -> None:
+        """A LOST track whose identity continues in a new track should end now."""
         for other in self.tracker.tracks:
-            if other.uid == tr.uid or other.state != LOST or other.group != tr.group or other.appearance is None:
-                continue
-            if (other.root_uid or other.uid) in exclude_roots:
-                continue
-            if tr.first_ts - other.last_ts > self.reid.window:
-                continue
-            ox1, oy1, ox2, oy2 = other.last_bbox
-            if math.dist(start, ((ox1 + ox2) / 2, oy2)) > self.reid.max_distance_frac * diag:
-                continue
-            sim = float(np.dot(other.appearance, tr.appearance))
-            if sim > best_sim:
-                best, best_sim = other, sim
-        if best is None:
-            return None
-        root = best.root_uid or best.uid
-        best.last_ts = -1e18  # retire the lost track; its identity continues in the new one
-        return root
+            if other.uid != keep_uid and other.state == LOST and (other.root_uid or other.uid) == root:
+                other.retired = True
 
     def flush(self) -> list[TrackSummary]:
         w, h = self.size or (1920, 1080)
@@ -242,12 +303,30 @@ class CameraAnalytics:
         traj = list(tr.trajectory)
         step = max(1, len(traj) // 50)
         pts = [[round(t, 2), round(x / w, 4), round(y / h, 4)] for t, x, y in traj[::step]]
-        last_ts = tr.last_ts if tr.last_ts > 0 else (traj[-1][0] if traj else tr.first_ts)
+        last_ts = tr.last_ts
         return TrackSummary(tr.uid, tr.root_uid or tr.uid, tr.cls, tr.group, tr.subtype, tr.first_ts,
                             last_ts, tr.hits, round(tr.mean_conf, 3), pts)
 
 
-def _blend(a: np.ndarray, b: np.ndarray, w: float = 0.3) -> np.ndarray:
-    v = (1 - w) * a + w * b
+def _mean_embedding(embs: list[np.ndarray]) -> np.ndarray | None:
+    if not embs:
+        return None
+    v = np.mean(np.stack(embs), axis=0)
     n = np.linalg.norm(v)
-    return v / n if n > 0 else a
+    return v / n if n > 0 else None
+
+
+def _foot(bbox) -> tuple[float, float]:
+    x1, y1, x2, y2 = bbox
+    return ((x1 + x2) / 2, y2)
+
+
+_last_session_uid = 0
+
+
+def _session_uid() -> int:
+    """First tracker id of a new pipeline: the clock in microseconds, and at least a million past the
+    previous pipeline in this process, so ids stay unique across restarts and settings reloads."""
+    global _last_session_uid
+    _last_session_uid = max(int(time.time() * 1_000_000), _last_session_uid + 1_000_000)
+    return _last_session_uid
